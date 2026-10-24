@@ -11,23 +11,48 @@ Taskroot is a small, local-first backlog for developers and coding agents. It st
 
 ```sh
 npm install --global taskroot
-tasks help
+tasks --help
 ```
 
 The package is named `taskroot` and installs both `tasks` and `taskroot` commands.
 
-## Start a backlog
+## Quick start
 
 Run this from a repository root:
 
 ```sh
-tasks init app --prefix APP --repo my-app
-tasks new app --title "Add offline support" --priority high --phase A
-tasks list
+tasks init shop --prefix SHOP --repo acme/shop
+tasks new shop --title "Add catalog endpoint" --priority high --phase A
+tasks new shop --title "Build search page" --priority medium --depends SHOP-001
 tasks next
 ```
 
-Use `taskroot help` for the same CLI under the package name.
+Use `taskroot help` or `tasks --help` for the full CLI summary.
+
+`next` shows `SHOP-001` as ready and `SHOP-002` waiting for its dependency. Finish the first task, then the search page becomes ready:
+
+```sh
+tasks status SHOP-001 in_progress
+tasks done SHOP-001 --evidence "API contract merged in PR #42"
+tasks next
+```
+
+Replay the workflow with the [executable demo](examples/demo.mjs): run `node examples/demo.mjs` from a clone. It also shows milestone progress and JSON output, then removes its temporary backlog.
+
+## Milestones
+
+Create a shared `tasks/milestones.json` file to group work across projects:
+
+```json
+{
+  "M1": {
+    "name": "Search MVP",
+    "goal": "Let customers find products"
+  }
+}
+```
+
+Assign tasks with `--milestone M1`, then run `tasks milestones` to see progress and dependency state. The executable demo includes this setup.
 
 Taskroot finds the nearest ancestor `tasks/` directory containing project files. You can set `TASKS_DIR` to use a specific backlog root.
 
@@ -44,12 +69,12 @@ Each project has a unique alphanumeric prefix. IDs use `<PREFIX>-NNN`. Commit `t
 
 | Command | Description |
 | --- | --- |
-| `tasks init <project> [--prefix APP] [--repo name]` | Create a project backlog. |
+| `tasks init <project> [--prefix APP] [--project name] [--repo name]` | Create a project backlog. |
 | `tasks new <project> --title "..."` | Create a task. Accepts `--description`, `--status`, `--priority`, `--phase`, `--milestone`, `--depends`, and `--repo`. |
 | `tasks list [--all] [--project name] [--status pending] [--priority high] [--milestone M1]` | List tasks and counts. By default, hides completed and cancelled tasks. |
 | `tasks next [--limit 10] [--project name] [--status pending] [--priority high] [--milestone M1]` | Show ready tasks, ordered by priority. |
 | `tasks show <ID>` | Show task details and status history. |
-| `tasks edit <ID> --title "..."` | Update task fields. Use `--depends ""` to clear dependencies. |
+| `tasks edit <ID> [--title "..."] [--description "..."] [--status ...]` | Update task fields, including priority, phase, milestone, dependencies, and repo. Use `--depends ""` to clear dependencies. |
 | `tasks status <ID> <status> [--evidence "..."]` | Change status and record evidence. |
 | `tasks done <ID> [--evidence "..."]` | Complete a task. |
 | `tasks milestones` | Show milestone progress and tasks without milestones. |
@@ -70,7 +95,11 @@ This lock coordinates Taskroot processes using this version. Editors and older v
 Add this short instruction to a repository's `AGENTS.md`:
 
 ```text
-Project backlog lives in tasks/. Use tasks list, tasks next, tasks new, tasks done, and tasks check. Keep task IDs unchanged.
+Project backlog lives in tasks/.
+Before coding, run tasks next --json and tasks show <ID> --json.
+Work on a ready task and keep existing task IDs unchanged.
+After tests pass, run tasks done <ID> --evidence "tests passed".
+Run tasks check before closing work.
 ```
 
 ## Development

@@ -6,4 +6,6 @@
 - Validate project prefixes, task documents, arguments, IDs, and dependencies.
 - Add status history, task details and editing, filters, and JSON output.
 - Split file storage and validation rules into separate modules.
+- Document dependencies, milestones, JSON output, and coding-agent workflows with a runnable demo.
+- Expand CLI help to cover all commands and filters.
 - Prepare the `taskroot` package for npm.

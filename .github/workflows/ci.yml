@@ -27,3 +27,4 @@ jobs:
       - run: npm install --global .
       - run: tasks --help
       - run: taskroot --help
+      - run: node examples/demo.mjs

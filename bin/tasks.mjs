@@ -551,20 +551,26 @@ const [, , cmd, ...rest] = process.argv;
 if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") {
   console.log(`uso: tasks <comando>
 
-  list [--all] [--milestone M1]         lista tasks (default: nao concluidas)
-  next [--limit N] [--milestone M1]     tasks prontas (deps concluidas), por prioridade
-  milestones                            resumo por milestone com estado das tasks
-  new <projeto> --title "..."           cria task com id automatico (prefixo unico por raiz)
-      [--description "..."] [--priority high|medium|low] [--status STATUS] [--phase A] [--milestone M1] [--depends ID,ID] [--repo nome]
-  init <projeto> [--prefix APP]         cria tasks/<projeto>/tasks.json
-  done <ID> [--evidence "..."]          marca completed (+data e evidencia)
-  status <ID> <status>                  pending|in_progress|blocked|completed|cancelled
+  init <project> [--prefix APP] [--project "..."] [--repo name]
+                                        cria tasks/<project>/tasks.json
+  new <project> --title "..." [--description "..."] [--priority high|medium|low]
+      [--status STATUS] [--phase A] [--milestone M1] [--depends ID,ID] [--repo name]
+                                        cria task com ID automatico
+  list [--all] [--project NAME] [--status STATUS] [--priority PRIORITY] [--milestone M1]
+                                        lista tasks; por padrao oculta concluidas e canceladas
+  next [--limit N] [--project NAME] [--status STATUS] [--priority PRIORITY] [--milestone M1]
+                                        mostra tasks prontas e bloqueadas por dependencia
   show <ID>                             exibe detalhes e historico
-  edit <ID> [--title ...] [--status ...] [--priority ...] [--description ...]
-  list [--project NAME] [--status STATUS] [--priority PRIORITY] [--all]
-  next [--project NAME] [--status STATUS] [--priority PRIORITY] [--limit N]
-  add --json to get structured JSON output
-  check                                 valida ids, deps, ciclos e campos
+  edit <ID> [--title ...] [--description ...] [--status ...] [--priority ...]
+      [--phase ...] [--milestone ...] [--depends ID,ID] [--repo ...] [--evidence ...]
+                                        atualiza task existente
+  status <ID> <STATUS> [--evidence "..."]
+                                        pending|in_progress|blocked|completed|cancelled
+  done <ID> [--evidence "..."]         marca como completed
+  milestones                            resume progresso dos milestones
+  check                                 valida projetos, IDs, dependencias e ciclos
+
+Adicione --json a comandos para saida estruturada. Use tasks --help para ver esta ajuda.
 
 dados: ${ROOT}
 projetos: ${projectDirs().join(", ") || "(nenhum, rode tasks init)"}
