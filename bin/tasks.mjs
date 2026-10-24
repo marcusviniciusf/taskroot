@@ -12,8 +12,10 @@ import {
 import { join, dirname } from "node:path";
 import { withRootLock, writeJsonAtomic } from "../lib/storage.mjs";
 import { CommandExit, DONE, PRIORITIES, RANK, READY_OK, STATUSES, autoPrefix, documentProblems, inferPrefix, nextId, normalizeId, requireText, validateArgs, validateProjectName } from "../lib/validation.mjs";
+import { displayPriority, displayStatus, language, t } from "../lib/i18n.mjs";
 
 const today = () => new Date().toISOString().slice(0, 10);
+const SCHEMA_VERSION = 1;
 
 function hasProjects(root) {
   try {
@@ -57,18 +59,22 @@ function load() {
     try {
       data = JSON.parse(readFileSync(file, "utf8"));
     } catch (error) {
-      throw new Error(`${file}: JSON invalido (${error.message})`);
+      throw new Error(t("errors.invalidJson", { file, error: error.message }));
     }
     if (!data || typeof data !== "object" || Array.isArray(data))
-      throw new Error(`${file}: documento deve ser um objeto JSON`);
+      throw new Error(t("errors.invalidDocument", { file }));
     if (!Array.isArray(data.tasks))
-      throw new Error(`${file}: tasks deve ser um array`);
+      throw new Error(t("errors.invalidTasks", { file }));
+    if (data.schema_version === undefined) data.schema_version = SCHEMA_VERSION;
+    else if (data.schema_version !== SCHEMA_VERSION)
+      throw new Error(t("errors.unsupportedSchema", { file, version: data.schema_version, supported: SCHEMA_VERSION }));
     db[name] = { file, data };
   }
   return db;
 }
 
 function save(entry) {
+  entry.data.schema_version = SCHEMA_VERSION;
   entry.data.updated_at = today();
   writeJsonAtomic(entry.file, entry.data);
 }
@@ -81,15 +87,23 @@ function loadMilestones() {
   try {
     data = JSON.parse(readFileSync(MILESTONES_FILE, "utf8"));
   } catch (error) {
-    throw new Error(`${MILESTONES_FILE}: JSON invalido (${error.message})`);
+    throw new Error(t("errors.invalidMilestone", { file: MILESTONES_FILE, error: error.message }));
   }
   if (!data || typeof data !== "object" || Array.isArray(data))
-    throw new Error(`${MILESTONES_FILE}: documento deve ser um objeto JSON`);
-  for (const [id, milestone] of Object.entries(data)) {
-    if (!milestone || typeof milestone !== "object" || Array.isArray(milestone))
-      throw new Error(`${MILESTONES_FILE}: ${id} deve ser um objeto`);
+    throw new Error(t("errors.invalidMilestoneDocument", { file: MILESTONES_FILE }));
+  let milestones = data;
+  if (data.schema_version !== undefined) {
+    if (data.schema_version !== SCHEMA_VERSION)
+      throw new Error(t("errors.unsupportedSchema", { file: MILESTONES_FILE, version: data.schema_version, supported: SCHEMA_VERSION }));
+    if (!data.milestones || typeof data.milestones !== "object" || Array.isArray(data.milestones))
+      throw new Error(t("errors.invalidMilestonesSchema", { file: MILESTONES_FILE }));
+    milestones = data.milestones;
   }
-  return data;
+  for (const [id, milestone] of Object.entries(milestones)) {
+    if (!milestone || typeof milestone !== "object" || Array.isArray(milestone))
+      throw new Error(t("errors.invalidMilestoneEntry", { file: MILESTONES_FILE, id }));
+  }
+  return milestones;
 }
 
 function allTasks(db) {
@@ -114,7 +128,7 @@ function parseArgs(argv) {
     if (a.startsWith("--")) {
       const [k, inline] = a.slice(2).split(/=(.*)/s);
       if (Object.hasOwn(flags, k)) {
-        console.error(`opcao repetida: --${k}`);
+        console.error(t("errors.repeatedOption", { name: k }));
         throw new CommandExit(1);
       }
       if (inline !== undefined) flags[k] = inline;
@@ -135,11 +149,41 @@ function counts(db) {
   return per;
 }
 
+function printTable(columns, rows) {
+  if (!rows.length) {
+    console.log(t("table.none"));
+    return;
+  }
+  const values = rows.map(row => columns.map(column =>
+    String(row[column.key] ?? "-").replace(/\s+/gu, " ").replaceAll("|", "\\|").trim(),
+  ));
+  const widths = columns.map((column, index) => values.reduce(
+    (width, row) => Math.max(width, row[index].length),
+    column.label.length,
+  ));
+  const border = `+${widths.map(width => "-".repeat(width + 2)).join("+")}+`;
+  const renderRow = cells => `| ${cells.map((cell, index) => cell.padEnd(widths[index])).join(" | ")} |`;
+
+  console.log(border);
+  console.log(renderRow(columns.map(column => column.label)));
+  console.log(border);
+  for (const row of values) console.log(renderRow(row));
+  console.log(border);
+}
+
+function matchesSearch(task, search) {
+  if (!search) return true;
+  const needle = search.trim().toLowerCase();
+  return [task.title, task.description].some(value =>
+    typeof value === "string" && value.toLowerCase().includes(needle),
+  );
+}
+
 function cmdList(db, { flags }) {
   const onlyPending = !flags.all && !flags.status;
   const projects = [];
   if (flags.project && !Object.hasOwn(db, flags.project)) {
-    console.error(`projeto desconhecido: ${flags.project}`);
+    console.error(t("errors.unknownProject", { project: flags.project }));
     throw new CommandExit(1);
   }
   for (const [proj, { data }] of Object.entries(db)) {
@@ -148,40 +192,59 @@ function cmdList(db, { flags }) {
         (!flags.project || proj === flags.project) &&
         (!flags.status || t.status === flags.status) &&
         (!flags.priority || t.priority === flags.priority) &&
+        matchesSearch(t, flags.search) &&
         (!onlyPending || (t.status !== DONE && t.status !== "cancelled")) &&
         (!flags.milestone || t.milestone === flags.milestone),
     );
     if (!tasks.length) continue;
     projects.push({ project: proj, repo: data.repo ?? null, total: data.tasks.length, tasks });
-    console.log(
-      `\n${proj.toUpperCase()}  (${data.repo || "?"})  ${tasks.length} de ${(data.tasks || []).length}`,
-    );
-    for (const t of tasks) {
-      const dep = t.depends_on?.length ? ` deps=${t.depends_on.join(",")}` : "";
-      const ms = t.milestone ? `${t.milestone} ` : "";
-      console.log(
-        `  ${ms}${t.id} [${t.status}] [${t.phase ?? "-"}] ${t.priority ?? "-"}  ${t.title}${dep}`,
-      );
-    }
+    console.log(`\n${t("list.projectCount", { project: proj.toUpperCase(), repo: data.repo || "?", shown: tasks.length, total: data.tasks.length })}`);
+    printTable([
+      { key: "id", label: t("table.id") },
+      { key: "status", label: t("table.status") },
+      { key: "phase", label: t("table.phase") },
+      { key: "priority", label: t("table.priority") },
+      { key: "milestone", label: t("table.milestone") },
+      { key: "title", label: t("table.title") },
+      { key: "dependencies", label: t("table.dependencies") },
+    ], tasks.map(t => ({
+      id: t.id,
+      status: displayStatus(t.status),
+      phase: t.phase,
+      priority: displayPriority(t.priority),
+      milestone: t.milestone,
+      title: t.title,
+      dependencies: t.depends_on?.join(", "),
+    })));
   }
   const per = counts(db);
   if (!Object.keys(per).length) {
-    console.log(`sem projetos em ${ROOT} (rode: tasks init <projeto>)`);
+    console.log(t("list.empty", { root: ROOT }));
     return { projects: [], summary: per };
   }
-  console.log("\nresumo:");
-  for (const [proj, c] of Object.entries(per)) {
-    console.log(
-      `  ${proj.padEnd(9)} total ${c.total} | pending ${c.pending || 0} | in_progress ${c.in_progress || 0} | blocked ${c.blocked || 0} | done ${c.completed || 0}`,
-    );
-  }
+  console.log(`\n${t("list.summary")}:`);
+  printTable([
+    { key: "project", label: t("table.project") },
+    { key: "total", label: t("table.total") },
+    { key: "pending", label: t("table.pending") },
+    { key: "inProgress", label: t("table.inProgress") },
+    { key: "blocked", label: t("table.blocked") },
+    { key: "completed", label: t("table.completed") },
+  ], Object.entries(per).map(([project, counts]) => ({
+    project,
+    total: counts.total,
+    pending: counts.pending || 0,
+    inProgress: counts.in_progress || 0,
+    blocked: counts.blocked || 0,
+    completed: counts.completed || 0,
+  })));
   return { projects, summary: per };
 }
 
 function cmdNext(db, { flags }) {
   const limit = Number(flags.limit || 10);
   if (flags.project && !Object.hasOwn(db, flags.project)) {
-    console.error(`projeto desconhecido: ${flags.project}`);
+    console.error(t("errors.unknownProject", { project: flags.project }));
     throw new CommandExit(1);
   }
   const done = new Set(allTasks(db).filter((x) => x.t.status === DONE).map((x) => normalizeId(x.t.id)));
@@ -193,6 +256,7 @@ function cmdNext(db, { flags }) {
     if (flags.project && x.proj !== flags.project) continue;
     if (flags.status && x.t.status !== flags.status) continue;
     if (flags.priority && x.t.priority !== flags.priority) continue;
+    if (!matchesSearch(x.t, flags.search)) continue;
     if (flags.milestone && x.t.milestone !== flags.milestone) continue;
     const missing = (x.t.depends_on || []).filter((d) => !done.has(normalizeId(d)));
     (missing.length ? waiting : ready).push({ ...x, missing });
@@ -204,17 +268,33 @@ function cmdNext(db, { flags }) {
     return pa - pb || pha.localeCompare(phb) || ia.localeCompare(ib);
   });
 
-  console.log(`prontas para comecar: ${ready.length}`);
-  for (const x of ready.slice(0, limit)) {
-    console.log(
-      `  ${x.t.id} [${x.proj}/${x.repo || "?"}] [${x.t.phase ?? "-"}] ${x.t.priority ?? "-"}  ${x.t.title}`,
-    );
-  }
+  console.log(t("next.ready", { count: ready.length }));
+  printTable([
+    { key: "id", label: t("table.id") },
+    { key: "status", label: t("table.status") },
+    { key: "priority", label: t("table.priority") },
+    { key: "project", label: t("table.projectRepo") },
+    { key: "phase", label: t("table.phase") },
+    { key: "title", label: t("table.title") },
+  ], ready.slice(0, limit).map(x => ({
+    id: x.t.id,
+    status: displayStatus(x.t.status),
+    priority: displayPriority(x.t.priority),
+    project: `${x.proj}/${x.repo || "?"}`,
+    phase: x.t.phase,
+    title: x.t.title,
+  })));
   if (waiting.length) {
-    console.log(`\nbloqueadas por dependencia: ${waiting.length}`);
-    for (const x of waiting.slice(0, limit)) {
-      console.log(`  ${x.t.id}  falta: ${x.missing.join(",")}  (${x.t.title})`);
-    }
+    console.log(`\n${t("next.blocked", { count: waiting.length })}`);
+    printTable([
+      { key: "id", label: t("table.id") },
+      { key: "title", label: t("table.title") },
+      { key: "missing", label: t("table.missing") },
+    ], waiting.slice(0, limit).map(x => ({
+      id: x.t.id,
+      title: x.t.title,
+      missing: x.missing.join(", "),
+    })));
   }
   return {
     ready: ready.slice(0, limit).map(x => ({ project: x.proj, repo: x.repo ?? null, ...x.t })),
@@ -227,12 +307,12 @@ function cmdNext(db, { flags }) {
 function cmdNew(db, { flags, pos }) {
   const proj = pos[0];
   if (!proj || !db[proj]) {
-    console.error(`projeto invalido. use: ${projectDirs().join(", ") || "(nenhum, rode tasks init)"}`);
+    console.error(t("errors.invalidProject", { projects: projectDirs().join(", ") || "(none)" }));
     throw new CommandExit(1);
   }
   validateProjectName(proj);
   if (flags.title === undefined) {
-    console.error('faltou --title "..."');
+    console.error(t("errors.missingTitle"));
     throw new CommandExit(1);
   }
   const title = requireText(flags.title, "title");
@@ -240,12 +320,12 @@ function cmdNew(db, { flags, pos }) {
   const dependsText = flags.depends === undefined ? "" : requireText(flags.depends, "depends");
   const depends = dependsText ? dependsText.split(",").map((s) => s.trim().toUpperCase()) : [];
   if (depends.some(id => !id)) {
-    console.error("--depends contem um ID vazio");
+    console.error(t("errors.emptyDependency"));
     throw new CommandExit(1);
   }
   for (const d of depends) {
     if (!findTask(db, d)) {
-      console.error(`dependencia inexistente: ${d}`);
+      console.error(t("errors.missingDependency", { id: d }));
       throw new CommandExit(1);
     }
   }
@@ -253,7 +333,7 @@ function cmdNew(db, { flags, pos }) {
   const milestoneValue = flags.milestone ?? pos[1];
   const milestone = milestoneValue === undefined ? undefined : requireText(milestoneValue, "milestone");
   if (milestone && Object.keys(milestones).length && !milestones[milestone]) {
-    console.error(`milestone invalido: ${milestone} (${Object.keys(milestones).join(", ")})`);
+    console.error(t("errors.unknownMilestone", { milestone, milestones: Object.keys(milestones).join(", ") }));
     throw new CommandExit(1);
   }
   const task = {
@@ -271,11 +351,11 @@ function cmdNew(db, { flags, pos }) {
     ...(depends.length ? { depends_on: depends } : {}),
   };
   if (!STATUSES.includes(task.status)) {
-    console.error(`status invalido: ${task.status} (${STATUSES.join(", ")})`);
+    console.error(t("errors.invalidStatus", { status: task.status, values: STATUSES.join(", ") }));
     throw new CommandExit(1);
   }
   if (!PRIORITIES.includes(task.priority)) {
-    console.error(`prioridade invalida: ${task.priority} (${PRIORITIES.join(", ")})`);
+    console.error(t("errors.invalidPriority", { priority: task.priority, values: PRIORITIES.join(", ") }));
     throw new CommandExit(1);
   }
   db[proj].data.tasks.push(task);
@@ -286,14 +366,14 @@ function cmdNew(db, { flags, pos }) {
     throw new CommandExit(1);
   }
   save(db[proj]);
-  console.log(`criada ${id} em ${proj}: ${title}`);
+  console.log(t("success.createdTask", { id, project: proj, title }));
   return task;
 }
 
 function cmdInit(db, { flags, pos }) {
   const proj = pos[0];
   if (!proj) {
-    console.error("uso: tasks init <projeto> [--prefix APP] [--repo nome] [--project \"...\"]");
+    console.error(t("errors.initUsage"));
     throw new CommandExit(1);
   }
   validateProjectName(proj);
@@ -301,7 +381,7 @@ function cmdInit(db, { flags, pos }) {
     ? autoPrefix(proj)
     : requireText(flags.prefix, "prefix").toUpperCase();
   if (!/^[A-Z0-9]+$/.test(prefix)) {
-    console.error("--prefix deve conter apenas letras e numeros");
+    console.error(t("errors.invalidPrefix"));
     throw new CommandExit(1);
   }
   const project = flags.project === undefined ? proj : requireText(flags.project, "project");
@@ -311,18 +391,19 @@ function cmdInit(db, { flags, pos }) {
   const repo = flags.repo === undefined ? undefined : requireText(flags.repo, "repo");
   for (const [existingName, { data }] of Object.entries(db)) {
     if (inferPrefix(data, existingName).toUpperCase() === prefix) {
-      console.error(`prefixo duplicado: ${prefix} ja usado por ${existingName}`);
+      console.error(t("errors.duplicatePrefix", { prefix, project: existingName }));
       throw new CommandExit(1);
     }
   }
   const dir = join(ROOT, proj);
   const file = join(dir, "tasks.json");
   if (existsSync(file)) {
-    console.error(`ja existe: ${file}`);
+    console.error(t("errors.fileExists", { file }));
     throw new CommandExit(1);
   }
   mkdirSync(dir, { recursive: true });
   const data = {
+    schema_version: SCHEMA_VERSION,
     project,
     description,
     prefix,
@@ -331,8 +412,8 @@ function cmdInit(db, { flags, pos }) {
     tasks: [],
   };
   writeJsonAtomic(file, data);
-  console.log(`criado ${file} (prefix ${prefix})`);
-  console.log(`proximo: tasks new ${proj} --title "primeira task"`);
+  console.log(t("success.createdProject", { file, prefix }));
+  console.log(t("success.nextTask", { project: proj }));
   return data;
 }
 
@@ -340,37 +421,38 @@ function cmdStatus(db, { flags, pos }) {
   const [id, status] = pos;
   const found = findTask(db, id || "");
   if (!found) {
-    console.error(`task nao encontrada: ${id}`);
+    console.error(t("errors.notFound", { id }));
     throw new CommandExit(1);
   }
   if (!STATUSES.includes(status)) {
-    console.error(`status invalido: ${status} (${STATUSES.join(", ")})`);
+    console.error(t("errors.invalidStatus", { status, values: STATUSES.join(", ") }));
     throw new CommandExit(1);
   }
   transition(found.t, status, flags.evidence);
   save(db[found.proj]);
-  console.log(`${found.t.id} -> ${status}`);
+  console.log(`${found.t.id} → ${displayStatus(status)}`);
   return found.t;
 }
 
 function cmdShow(db, { pos }) {
   const found = findTask(db, pos[0]);
   if (!found) {
-    console.error(`task nao encontrada ou ID ambiguo: ${pos[0]}`);
+    console.error(t("errors.ambiguousTask", { id: pos[0] }));
     throw new CommandExit(1);
   }
-  console.log(`${found.t.id} [${found.t.status}] [${found.t.priority ?? "-"}] [${found.t.phase ?? "-"}]`);
-  console.log(`projeto: ${found.proj}${found.repo ? ` (${found.repo})` : ""}`);
-  console.log(`titulo: ${found.t.title}`);
-  if (found.t.description) console.log(`descricao: ${found.t.description}`);
-  if (found.t.milestone) console.log(`milestone: ${found.t.milestone}`);
-  if (found.t.depends_on?.length) console.log(`dependencias: ${found.t.depends_on.join(", ")}`);
-  if (found.t.evidence) console.log(`evidencia atual: ${found.t.evidence}`);
-  if (found.t.completed_at) console.log(`concluida em: ${found.t.completed_at}`);
+  console.log(`${found.t.id} [${displayStatus(found.t.status)}] [${displayPriority(found.t.priority)}] [${found.t.phase ?? "-"}]`);
+  console.log(`${t("details.project")}: ${found.proj}${found.repo ? ` (${found.repo})` : ""}`);
+  console.log(`${t("details.title")}: ${found.t.title}`);
+  if (found.t.description) console.log(`${t("details.description")}: ${found.t.description}`);
+  if (found.t.milestone) console.log(`${t("details.milestone")}: ${found.t.milestone}`);
+  if (found.t.depends_on?.length) console.log(`${t("details.dependencies")}: ${found.t.depends_on.join(", ")}`);
+  if (found.t.evidence) console.log(`${t("details.evidence")}: ${found.t.evidence}`);
+  if (found.t.completed_at) console.log(`${t("details.completedAt")}: ${found.t.completed_at}`);
   if (found.t.history?.length) {
-    console.log("historico:");
+    console.log(`${t("details.history")}:`);
     for (const event of found.t.history) {
-      console.log(`  ${event.at}: ${event.from_status ?? "(nova)"} -> ${event.to_status}${event.evidence ? `; evidencia: ${event.evidence}` : ""}`);
+      const from = event.from_status ? displayStatus(event.from_status) : t("details.new");
+      console.log(`  ${event.at}: ${from} → ${displayStatus(event.to_status)}${event.evidence ? `; ${t("details.evidenceHistory")}: ${event.evidence}` : ""}`);
     }
   }
   return found.t;
@@ -379,12 +461,12 @@ function cmdShow(db, { pos }) {
 function cmdEdit(db, { flags, pos }) {
   const found = findTask(db, pos[0]);
   if (!found) {
-    console.error(`task nao encontrada ou ID ambiguo: ${pos[0]}`);
+    console.error(t("errors.ambiguousTask", { id: pos[0] }));
     throw new CommandExit(1);
   }
   const changes = Object.keys(flags).filter(key => key !== "json");
   if (!changes.length) {
-    console.error('informe campos: --title, --description, --status, --priority, --phase, --milestone, --depends ou --repo');
+    console.error(t("errors.editFields"));
     throw new CommandExit(1);
   }
   const original = { ...found.t, ...(found.t.depends_on ? { depends_on: [...found.t.depends_on] } : {}), ...(found.t.history ? { history: [...found.t.history] } : {}) };
@@ -406,7 +488,7 @@ function cmdEdit(db, { flags, pos }) {
     const dependencies = text ? text.split(",").map(id => id.trim().toUpperCase()) : [];
     if (dependencies.some(id => !id)) {
       Object.assign(found.t, original);
-      console.error("--depends contem um ID vazio");
+      console.error(t("errors.emptyDependency"));
       throw new CommandExit(1);
     }
     found.t.depends_on = dependencies;
@@ -422,7 +504,7 @@ function cmdEdit(db, { flags, pos }) {
   }
   found.t.updated_at = today();
   save(db[found.proj]);
-  console.log(`atualizada ${found.t.id}: ${changes.filter(key => key !== "json").join(", ")}`);
+  console.log(t("success.updatedTask", { id: found.t.id, fields: changes.filter(key => key !== "json").join(", ") }));
   return { task: found.t, changed_fields: changes.filter(key => key !== "json") };
 }
 
@@ -453,7 +535,7 @@ function cmdMilestones(db) {
   const milestones = loadMilestones();
   const keys = Object.keys(milestones);
   if (!keys.length) {
-    console.log("sem milestones.json");
+    console.log(t("details.noMilestones"));
     return [];
   }
   const all = allTasks(db);
@@ -477,22 +559,31 @@ function cmdMilestones(db) {
           : READY_OK.includes(x.t.status) ? "ready" : x.t.status,
       })),
     });
-    console.log(`\n${key} — ${meta.name}   (${done}/${tasks.length} concluidas, ${open.length} abertas)`);
+    console.log(`\n${t("details.milestoneHeading", { id: key, name: meta.name, completed: done, total: tasks.length, open: open.length })}`);
     if (meta.goal) console.log(`  ${meta.goal}`);
-    for (const x of open) {
+    printTable([
+      { key: "id", label: t("table.id") },
+      { key: "status", label: t("table.status") },
+      { key: "title", label: t("table.title") },
+      { key: "state", label: t("table.state") },
+    ], open.map(x => {
       const missing = (x.t.depends_on || []).filter((d) => !doneIds.has(normalizeId(d)));
       const state = missing.length
-        ? `bloqueada (falta ${missing.join(",")})`
+        ? t("details.milestoneBlocked", { ids: missing.join(", ") })
         : READY_OK.includes(x.t.status)
-          ? "pronta"
-          : x.t.status;
-      console.log(`  - ${x.t.id} [${x.t.status}] ${x.t.title}  -> ${state}`);
-    }
+          ? t("details.milestoneReady")
+          : displayStatus(x.t.status);
+      return { id: x.t.id, status: displayStatus(x.t.status), title: x.t.title, state };
+    }));
   }
   const orphan = all.filter((x) => !x.t.milestone && x.t.status !== "cancelled" && x.t.status !== DONE);
   if (orphan.length) {
-    console.log(`\nsem milestone: ${orphan.length}`);
-    for (const x of orphan) console.log(`  - ${x.t.id} [${x.proj}] ${x.t.title}`);
+    console.log(`\n${t("details.orphanCount", { count: orphan.length })}`);
+    printTable([
+      { key: "id", label: t("table.id") },
+      { key: "project", label: t("table.project") },
+      { key: "title", label: t("table.title") },
+    ], orphan.map(x => ({ id: x.t.id, project: x.proj, title: x.t.title })));
   }
   return { milestones: result, without_milestone: orphan };
 }
@@ -501,16 +592,16 @@ function cmdDone(db, { flags, pos }) {
   const [id] = pos;
   const found = findTask(db, id || "");
   if (!found) {
-    console.error(`task nao encontrada: ${id}`);
+    console.error(t("errors.notFound", { id }));
     throw new CommandExit(1);
   }
   if (found.t.status === DONE && flags.evidence === undefined) {
-    console.log(`${found.t.id} ja estava completed`);
+    console.log(t("errors.alreadyCompleted", { id: found.t.id }));
     return found.t;
   }
   transition(found.t, DONE, flags.evidence);
   save(db[found.proj]);
-  console.log(`${found.t.id} -> completed${flags.evidence ? ` (${flags.evidence})` : ""}`);
+  console.log(`${t("success.completedTask", { id: found.t.id })}${flags.evidence ? ` (${flags.evidence})` : ""}`);
   return found.t;
 }
 
@@ -524,13 +615,13 @@ function cmdCheck(db) {
   const inProgress = valid.filter((x) => x.t.status === "in_progress").length;
   const blocked = valid.filter((x) => x.t.status === "blocked").length;
   const completed = valid.filter((x) => x.t.status === DONE).length;
-  console.log(`tasks: ${total} | pending ${pending} | in_progress ${inProgress} | blocked ${blocked} | done ${completed}`);
+  console.log(t("errors.taskSummary", { total, pending, inProgress, blocked, completed }));
   if (problems.length) {
-    console.log(`\n${problems.length} problema(s):`);
+    console.log(`\n${t("errors.problemCount", { count: problems.length })}`);
     for (const p of problems) console.log(`  - ${p}`);
     return { valid: false, total, counts: { pending, in_progress: inProgress, blocked, completed }, errors: problems };
   }
-  console.log("ok: nenhum problema");
+  console.log(t("errors.checkOk"));
   return { valid: true, total, counts: { pending, in_progress: inProgress, blocked, completed }, errors: [] };
 }
 
@@ -547,34 +638,127 @@ const COMMANDS = {
   milestones: cmdMilestones,
 };
 
+function helpText(language) {
+  const data = `\n${language === "pt" ? "Dados" : "Data"}: ${ROOT}`;
+  const projects = `${language === "pt" ? "Projetos" : "Projects"}: ${projectDirs().join(", ") || (language === "pt" ? "(nenhum; rode tasks init)" : "(none; run tasks init)")}`;
+  const tip = language === "pt"
+    ? "Dica: rode no projeto ou defina TASKS_DIR=/caminho/tasks."
+    : "Tip: run inside a project or set TASKS_DIR=/path/to/tasks.";
+
+  if (language === "pt") {
+    return `Taskroot — backlog local para projetos de software
+
+Uso
+  tasks <comando> [opções]
+
+Comandos
+  init <projeto> [--prefix APP] [--project "..."] [--repo nome]
+    Cria o arquivo tasks/<projeto>/tasks.json.
+
+  new <projeto> --title "..." [opções]
+    Opções: --description "...", --priority high|medium|low, --status STATUS,
+            --phase FASE, --milestone MARCO, --depends ID,ID, --repo nome.
+    Cria uma tarefa com ID automático.
+
+  list [--all] [--project NOME] [--status STATUS] [--priority PRIORIDADE] [--milestone M1] [--search TEXTO]
+    Lista tarefas; por padrão, oculta as concluídas e canceladas.
+
+  next [--limit N] [--project NOME] [--status STATUS] [--priority PRIORIDADE] [--milestone M1] [--search TEXTO]
+    Mostra tarefas prontas e bloqueadas por dependências.
+
+  show <ID>
+    Exibe detalhes e histórico da tarefa.
+
+  edit <ID> [opções]
+    Atualiza título, descrição, status, prioridade, fase, marco, dependências, repositório ou evidência.
+
+  status <ID> <STATUS> [--evidence "..."]
+    Status aceitos: pending, in_progress, blocked, completed, cancelled.
+
+  done <ID> [--evidence "..."]
+    Marca a tarefa como concluída.
+
+  milestones
+    Resume o progresso dos marcos.
+
+  check
+    Valida projetos, IDs, dependências e ciclos.
+
+Saída estruturada
+  Adicione --json a qualquer comando para receber JSON.
+
+Idioma
+  Segue o idioma do sistema. Para definir manualmente:
+    TASKROOT_LANG=pt tasks --help
+    TASKROOT_LANG=en tasks --help
+
+Exemplos
+  tasks init loja --prefix SHOP --repo organizacao/loja
+  tasks new loja --title "Adicionar busca" --priority high
+  tasks next
+${data}
+${projects}
+${tip}`;
+  }
+
+  return `Taskroot — local backlog for software projects
+
+Usage
+  tasks <command> [options]
+
+Commands
+  init <project> [--prefix APP] [--project "..."] [--repo name]
+    Creates tasks/<project>/tasks.json.
+
+  new <project> --title "..." [options]
+    Options: --description "...", --priority high|medium|low, --status STATUS,
+            --phase PHASE, --milestone M1, --depends ID,ID, --repo name.
+    Creates a task with an automatic ID.
+
+  list [--all] [--project NAME] [--status STATUS] [--priority PRIORITY] [--milestone M1] [--search TEXT]
+    Lists tasks; completed and cancelled tasks are hidden by default.
+
+  next [--limit N] [--project NAME] [--status STATUS] [--priority PRIORITY] [--milestone M1] [--search TEXT]
+    Shows ready tasks and tasks blocked by dependencies.
+
+  show <ID>
+    Shows task details and history.
+
+  edit <ID> [options]
+    Updates title, description, status, priority, phase, milestone, dependencies, repository, or evidence.
+
+  status <ID> <STATUS> [--evidence "..."]
+    Accepted statuses: pending, in_progress, blocked, completed, cancelled.
+
+  done <ID> [--evidence "..."]
+    Marks a task as completed.
+
+  milestones
+    Summarizes milestone progress.
+
+  check
+    Validates projects, IDs, dependencies, and cycles.
+
+Structured output
+  Add --json to any command to receive JSON.
+
+Language
+  Follows the system language. Override it with:
+    TASKROOT_LANG=pt tasks --help
+    TASKROOT_LANG=en tasks --help
+
+Examples
+  tasks init shop --prefix SHOP --repo organization/shop
+  tasks new shop --title "Add search" --priority high
+  tasks next
+${data}
+${projects}
+${tip}`;
+}
+
 const [, , cmd, ...rest] = process.argv;
 if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") {
-  console.log(`uso: tasks <comando>
-
-  init <project> [--prefix APP] [--project "..."] [--repo name]
-                                        cria tasks/<project>/tasks.json
-  new <project> --title "..." [--description "..."] [--priority high|medium|low]
-      [--status STATUS] [--phase A] [--milestone M1] [--depends ID,ID] [--repo name]
-                                        cria task com ID automatico
-  list [--all] [--project NAME] [--status STATUS] [--priority PRIORITY] [--milestone M1]
-                                        lista tasks; por padrao oculta concluidas e canceladas
-  next [--limit N] [--project NAME] [--status STATUS] [--priority PRIORITY] [--milestone M1]
-                                        mostra tasks prontas e bloqueadas por dependencia
-  show <ID>                             exibe detalhes e historico
-  edit <ID> [--title ...] [--description ...] [--status ...] [--priority ...]
-      [--phase ...] [--milestone ...] [--depends ID,ID] [--repo ...] [--evidence ...]
-                                        atualiza task existente
-  status <ID> <STATUS> [--evidence "..."]
-                                        pending|in_progress|blocked|completed|cancelled
-  done <ID> [--evidence "..."]         marca como completed
-  milestones                            resume progresso dos milestones
-  check                                 valida projetos, IDs, dependencias e ciclos
-
-Adicione --json a comandos para saida estruturada. Use tasks --help para ver esta ajuda.
-
-dados: ${ROOT}
-projetos: ${projectDirs().join(", ") || "(nenhum, rode tasks init)"}
-dica: rode dentro do projeto, ou defina TASKS_DIR=/caminho/tasks`);
+  console.log(helpText(language));
   process.exit(0);
 }
 const mutation = ["new", "init", "done", "status", "edit"].includes(cmd);
@@ -588,7 +772,7 @@ if (jsonOutput) {
 }
 try {
   if (!COMMANDS[cmd]) {
-    console.error(`comando desconhecido: ${cmd} (use help)`);
+    console.error(t("errors.unknownCommand", { command: cmd }));
     throw new CommandExit(1);
   }
   const args = parseArgs(rest);
@@ -598,7 +782,7 @@ try {
     if (cmd !== "check") {
       const problems = documentProblems(db, loadMilestones());
       if (problems.length) {
-        console.error(`dados invalidos; execute tasks check:\n${problems.map(problem => `  - ${problem}`).join("\n")}`);
+        console.error(t("errors.invalidData", { problems: problems.map(problem => `  - ${problem}`).join("\n") }));
         throw new CommandExit(1);
       }
     }
@@ -611,7 +795,7 @@ try {
   if (jsonOutput) originalLog(JSON.stringify({
     ok: false,
     command: cmd,
-    error: { message: diagnostics.join("\n") || error.message || "comando invalido" },
+    error: { message: diagnostics.join("\n") || error.message || t("validation.invalidPositionals", { command: cmd }) },
   }));
   else if (!(error instanceof CommandExit)) console.error(error.message);
   process.exitCode = error instanceof CommandExit ? error.code : 1;

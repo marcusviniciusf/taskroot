@@ -1,6 +1,8 @@
 # Taskroot
 
-Taskroot is a small, local-first backlog for developers and coding agents. It stores ordinary JSON files in your project, keeps them versionable with Git, and needs no runtime dependencies.
+Taskroot is a local-first backlog for developers and coding agents. It stores ordinary JSON files in your repository, tracks dependencies between tasks, and has no runtime dependencies.
+
+The CLI prints aligned tables for task lists, readiness, summaries, and milestones. Messages follow the system language in Portuguese or English.
 
 ## Requirements
 
@@ -14,11 +16,11 @@ npm install --global taskroot
 tasks --help
 ```
 
-The package is named `taskroot` and installs both `tasks` and `taskroot` commands.
+The npm package is named `taskroot` and installs both `tasks` and `taskroot` commands.
 
 ## Quick start
 
-Run this from a repository root:
+Run these commands from a repository root:
 
 ```sh
 tasks init shop --prefix SHOP --repo acme/shop
@@ -27,9 +29,7 @@ tasks new shop --title "Build search page" --priority medium --depends SHOP-001
 tasks next
 ```
 
-Use `taskroot help` or `tasks --help` for the full CLI summary.
-
-`next` shows `SHOP-001` as ready and `SHOP-002` waiting for its dependency. Finish the first task, then the search page becomes ready:
+`next` lists ready tasks first and shows tasks waiting on dependencies in a separate table. After the endpoint is complete, the search page becomes ready:
 
 ```sh
 tasks status SHOP-001 in_progress
@@ -37,33 +37,47 @@ tasks done SHOP-001 --evidence "API contract merged in PR #42"
 tasks next
 ```
 
-Replay the workflow with the [executable demo](examples/demo.mjs): run `node examples/demo.mjs` from a clone. It also shows milestone progress and JSON output, then removes its temporary backlog.
+Search task titles and descriptions with `--search`. Search is case-insensitive and combines with the existing filters:
 
-## Milestones
-
-Create a shared `tasks/milestones.json` file to group work across projects:
-
-```json
-{
-  "M1": {
-    "name": "Search MVP",
-    "goal": "Let customers find products"
-  }
-}
+```sh
+tasks list --all --search "catalog"
+tasks next --priority high --search "API"
 ```
 
-Assign tasks with `--milestone M1`, then run `tasks milestones` to see progress and dependency state. The executable demo includes this setup.
+The [executable demo](examples/demo.mjs) runs this workflow with dependencies, milestones, JSON output, and status history. Run `node examples/demo.mjs` from a clone; it creates and removes a temporary backlog.
 
-Taskroot finds the nearest ancestor `tasks/` directory containing project files. You can set `TASKS_DIR` to use a specific backlog root.
+## Projects and milestones
+
+Taskroot finds the nearest ancestor `tasks/` directory containing project files. Set `TASKS_DIR` to choose a specific backlog root.
 
 ```text
 tasks/
   milestones.json             # optional shared milestones
-  app/
+  shop/
     tasks.json                # project metadata and tasks
 ```
 
-Each project has a unique alphanumeric prefix. IDs use `<PREFIX>-NNN`. Commit `tasks/` with your source repository to review backlog changes alongside code.
+Create milestones in `tasks/milestones.json`:
+
+```json
+{
+  "schema_version": 1,
+  "milestones": {
+    "M1": {
+      "name": "Search MVP",
+      "goal": "Let customers find products"
+    }
+  }
+}
+```
+
+Assign tasks with `--milestone M1`, then run `tasks milestones` to see progress and dependency state. Each project uses a unique alphanumeric prefix; generated IDs follow `<PREFIX>-NNN`. Commit `tasks/` with your source so backlog changes can be reviewed alongside code.
+
+## Data format and compatibility
+
+New project files include `"schema_version": 1`. Existing unversioned `tasks.json` files remain readable and receive version 1 on their next successful write. Taskroot rejects files that declare an unsupported version.
+
+Legacy flat `milestones.json` files remain readable. New milestone files use the versioned envelope shown above. Run `tasks check` to validate task files, IDs, dependencies, cycles, and milestone references.
 
 ## Commands
 
@@ -71,10 +85,10 @@ Each project has a unique alphanumeric prefix. IDs use `<PREFIX>-NNN`. Commit `t
 | --- | --- |
 | `tasks init <project> [--prefix APP] [--project name] [--repo name]` | Create a project backlog. |
 | `tasks new <project> --title "..."` | Create a task. Accepts `--description`, `--status`, `--priority`, `--phase`, `--milestone`, `--depends`, and `--repo`. |
-| `tasks list [--all] [--project name] [--status pending] [--priority high] [--milestone M1]` | List tasks and counts. By default, hides completed and cancelled tasks. |
-| `tasks next [--limit 10] [--project name] [--status pending] [--priority high] [--milestone M1]` | Show ready tasks, ordered by priority. |
+| `tasks list [--all] [--project name] [--status pending] [--priority high] [--milestone M1] [--search text]` | List tasks and counts. Hides completed and cancelled tasks by default. Search checks title and description. |
+| `tasks next [--limit 10] [--project name] [--status pending] [--priority high] [--milestone M1] [--search text]` | Show ready tasks and tasks blocked by dependencies, ordered by priority. |
 | `tasks show <ID>` | Show task details and status history. |
-| `tasks edit <ID> [--title "..."] [--description "..."] [--status ...]` | Update task fields, including priority, phase, milestone, dependencies, and repo. Use `--depends ""` to clear dependencies. |
+| `tasks edit <ID> [options]` | Update title, description, status, priority, phase, milestone, dependencies, repo, or evidence. Use `--depends ""` to clear dependencies. |
 | `tasks status <ID> <status> [--evidence "..."]` | Change status and record evidence. |
 | `tasks done <ID> [--evidence "..."]` | Complete a task. |
 | `tasks milestones` | Show milestone progress and tasks without milestones. |
@@ -82,17 +96,28 @@ Each project has a unique alphanumeric prefix. IDs use `<PREFIX>-NNN`. Commit `t
 
 Statuses: `pending`, `in_progress`, `blocked`, `completed`, `cancelled`. Priorities: `high`, `medium`, `low`.
 
-Add `--json` to commands for structured output. JSON results use `{ "ok", "command", "data" }`; errors use `{ "ok": false, "command", "error": { "message" } }`.
+Add `--json` for structured output. JSON values keep canonical status and priority names regardless of the CLI language. Successful results use `{ "ok", "command", "data" }`; errors use `{ "ok": false, "command", "error": { "message" } }`.
+
+## CLI language
+
+Taskroot follows `LC_ALL`, `LC_MESSAGES`, or `LANG`, then the runtime's system locale. It supports Portuguese and English. Set `TASKROOT_LANG` to override the detected language:
+
+```sh
+TASKROOT_LANG=pt tasks --help
+TASKROOT_LANG=en tasks --help
+```
+
+The README and examples use English; CLI labels and messages are localized without changing stored JSON values.
 
 ## Safe local writes
 
-Mutating commands coordinate through a lock in the backlog root and replace JSON files atomically. If a process is stopped while holding the lock, it may need manual recovery. Check the PID in `tasks/.tasks.lock` and confirm no Taskroot command is running before removing it. Commands time out after ten seconds instead of overwriting data.
+Mutating commands coordinate through a PID lock in the backlog root and replace JSON files atomically. Taskroot recovers a lock when its recorded process has exited, and preserves locks owned by active processes. Commands wait up to ten seconds before reporting a lock conflict.
 
-This lock coordinates Taskroot processes using this version. Editors and older versions do not participate. Network filesystems have not been validated.
+The lock coordinates Taskroot processes using this version. Editors and older versions do not participate. Network filesystems have not been validated.
 
 ## Agent setup
 
-Add this short instruction to a repository's `AGENTS.md`:
+Add this instruction to a repository's `AGENTS.md`:
 
 ```text
 Project backlog lives in tasks/.

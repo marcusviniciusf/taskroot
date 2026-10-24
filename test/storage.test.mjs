@@ -16,9 +16,12 @@ function fixture(t) {
   return root;
 }
 function run(root, ...args) {
+  return runWithEnv(root, {}, ...args);
+}
+function runWithEnv(root, envOverrides, ...args) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [cli, ...args], {
-      env: { ...process.env, TASKS_DIR: root },
+      env: { ...process.env, TASKS_DIR: root, TASKROOT_LANG: "pt", ...envOverrides },
     });
     let output = "";
     child.stdout.on("data", chunk => { output += chunk; });
@@ -66,12 +69,26 @@ test("invalid commands release the lock and leave data unchanged", async t => {
   assert.equal(valid.code, 0, valid.output);
 });
 
-test("existing locks time out without deleting the owner's lock", t => {
+test("active locks time out without deleting the owner's lock", t => {
   const root = fixture(t);
   const lock = join(root, ".tasks.lock");
-  writeFileSync(lock, "owner\n");
-  assert.throws(() => withRootLock(root, () => assert.fail("must not run"), { timeoutMs: 25 }), /backlog ocupado/);
-  assert.equal(readFileSync(lock, "utf8"), "owner\n");
+  const owner = `${process.pid}\n`;
+  writeFileSync(lock, owner);
+  assert.throws(() => withRootLock(root, () => assert.fail("must not run"), { timeoutMs: 25 }), /locked|bloqueado/i);
+  assert.equal(readFileSync(lock, "utf8"), owner);
+});
+
+test("stale locks from exited processes are recovered", async t => {
+  const root = fixture(t);
+  const owner = spawn(process.execPath, ["-e", "process.exit(0)"]);
+  await new Promise((resolve, reject) => {
+    owner.once("error", reject);
+    owner.once("close", resolve);
+  });
+  const lock = join(root, ".tasks.lock");
+  writeFileSync(lock, `${owner.pid}\n`);
+  assert.equal(withRootLock(root, () => "recovered", { timeoutMs: 100 }), "recovered");
+  assert.equal(readdirSync(root).includes(".tasks.lock"), false);
 });
 
 test("failed serialization preserves the original file and cleans temporary files", t => {
@@ -95,11 +112,69 @@ test("parallel initialization cannot overwrite an existing project", async t => 
   assert.deepEqual(data.tasks, []);
 });
 
+test("new projects use schema version 1 and legacy projects migrate on write", async t => {
+  const root = fixture(t);
+  const initialized = await run(root, "init", "other", "--prefix", "OTH");
+  assert.equal(initialized.code, 0, initialized.output);
+  assert.equal(JSON.parse(readFileSync(join(root, "other", "tasks.json"), "utf8")).schema_version, 1);
+
+  assert.equal("schema_version" in read(root), false);
+  const created = await run(root, "new", "app", "--title", "Migrated task");
+  assert.equal(created.code, 0, created.output);
+  assert.equal(read(root).schema_version, 1);
+});
+
+test("versioned and legacy milestone documents load; unsupported schemas fail", async t => {
+  const root = fixture(t);
+  const file = join(root, "milestones.json");
+  writeFileSync(file, JSON.stringify({ M1: { name: "Legacy milestone" } }));
+  const legacy = await run(root, "milestones", "--json");
+  assert.equal(legacy.code, 0, legacy.output);
+  assert.equal(JSON.parse(legacy.output).data.milestones[0].id, "M1");
+
+  writeFileSync(file, JSON.stringify({ schema_version: 1, milestones: { M2: { name: "Versioned milestone" } } }));
+  const versioned = await run(root, "milestones", "--json");
+  assert.equal(versioned.code, 0, versioned.output);
+  assert.equal(JSON.parse(versioned.output).data.milestones[0].id, "M2");
+
+  writeFileSync(file, JSON.stringify({ schema_version: 2, milestones: {} }));
+  const unsupported = await run(root, "check", "--json");
+  assert.equal(unsupported.code, 1);
+  assert.match(JSON.parse(unsupported.output).error.message, /versão de esquema 2/);
+});
+
+test("milestone table labels task status and readiness separately", async t => {
+  const root = fixture(t);
+  writeFileSync(join(root, "milestones.json"), JSON.stringify({
+    schema_version: 1,
+    milestones: { M1: { name: "First milestone" } },
+  }));
+  const document = read(root);
+  document.tasks = [{ id: "APP-001", title: "Prepare release", status: "pending", milestone: "M1" }];
+  writeFileSync(join(root, "app", "tasks.json"), JSON.stringify(document));
+
+  const result = await run(root, "milestones");
+  assert.equal(result.code, 0, result.output);
+  assert.match(result.output, /\| ID\s+\| STATUS\s+\| TÍTULO\s+\| SITUAÇÃO\s+\|/);
+  assert.match(result.output, /0\/1 concluídas, 1 em aberto/);
+  assert.match(result.output, /pronta/);
+});
+
+test("unsupported task schema fails with a structured error", async t => {
+  const root = fixture(t);
+  const document = read(root);
+  document.schema_version = 2;
+  writeFileSync(join(root, "app", "tasks.json"), JSON.stringify(document));
+  const result = await run(root, "list", "--json");
+  assert.equal(result.code, 1);
+  assert.match(JSON.parse(result.output).error.message, /versão de esquema 2/);
+});
+
 test("initialization rejects duplicate prefixes and traversal project names", async t => {
   const root = fixture(t);
   const duplicate = await run(root, "init", "other", "--prefix", "app");
   assert.equal(duplicate.code, 1);
-  assert.match(duplicate.output, /prefixo duplicado/);
+  assert.match(duplicate.output, /prefixo APP já pertence/);
   const traversal = await run(root, "init", "../outside");
   assert.equal(traversal.code, 1);
   assert.equal(readFileSync(join(root, "app", "tasks.json"), "utf8").includes("outside"), false);
@@ -136,11 +211,11 @@ test("check reports duplicate IDs and prefixes across projects", async t => {
   ] }));
   const result = await run(root, "check");
   assert.equal(result.code, 1);
-  assert.match(result.output, /prefixo duplicado APP/);
-  assert.match(result.output, /id duplicado/);
+  assert.match(result.output, /Prefixo duplicado APP/);
+  assert.match(result.output, /ID duplicado/);
 });
 
-test("case-insensitive completed dependencies are ready in next and milestones", async t => {
+test("case-insensitive completed dependencies are ready in next", async t => {
   const root = fixture(t);
   const document = read(root);
   document.tasks = [
@@ -150,8 +225,72 @@ test("case-insensitive completed dependencies are ready in next and milestones",
   writeFileSync(join(root, "app", "tasks.json"), JSON.stringify(document));
   const next = await run(root, "next");
   assert.equal(next.code, 0, next.output);
-  assert.match(next.output, /prontas para comecar: 1/);
-  assert.doesNotMatch(next.output, /bloqueadas por dependencia/);
+  assert.match(next.output, /Prontas para começar: 1/);
+  assert.doesNotMatch(next.output, /Bloqueadas por dependência/);
+});
+
+test("list and next print task rows as tables", async t => {
+  const root = fixture(t);
+  const created = await run(root, "new", "app", "--title", "Review tasks", "--phase", "A", "--priority", "high");
+  assert.equal(created.code, 0, created.output);
+
+  const listed = await run(root, "list", "--all");
+  assert.equal(listed.code, 0, listed.output);
+  assert.match(listed.output, /\| ID\s+\| STATUS\s+\| FASE\s+\| PRIORIDADE\s+\| MARCO\s+\| TÍTULO\s+\| DEPENDÊNCIAS\s+\|/);
+  assert.match(listed.output, /\| APP-001\s+\| pendente\s+\| A\s+\| alta\s+\|/);
+  assert.match(listed.output, /Review tasks/);
+
+  const next = await run(root, "next");
+  assert.equal(next.code, 0, next.output);
+  assert.match(next.output, /\| ID\s+\| STATUS\s+\| PRIORIDADE\s+\| PROJETO\/REPO\s+\| FASE\s+\| TÍTULO\s+\|/);
+  assert.match(next.output, /\| APP-001\s+\| pendente\s+\| alta\s+\| app\/\?\s+\| A\s+\| Review tasks/);
+});
+
+test("search matches title and description case-insensitively and composes with filters", async t => {
+  const root = fixture(t);
+  const document = read(root);
+  document.tasks = [
+    { id: "APP-001", title: "Improve CLI tables", description: "Align terminal output", status: "pending", priority: "high" },
+    { id: "APP-002", title: "Document JSON output", description: "CLI examples in README", status: "pending", priority: "medium" },
+    { id: "APP-003", title: "Old CLI guide", description: "README archive", status: "completed", priority: "low" },
+  ];
+  writeFileSync(join(root, "app", "tasks.json"), JSON.stringify(document));
+
+  const listed = await run(root, "list", "--all", "--search", "cli", "--json");
+  assert.equal(listed.code, 0, listed.output);
+  assert.deepEqual(JSON.parse(listed.output).data.projects[0].tasks.map(task => task.id), ["APP-001", "APP-002", "APP-003"]);
+
+  const next = await run(root, "next", "--search", "readme", "--priority", "medium", "--status", "pending", "--json");
+  assert.equal(next.code, 0, next.output);
+  assert.deepEqual(JSON.parse(next.output).data.ready.map(task => task.id), ["APP-002"]);
+
+  const empty = await run(root, "list", "--search=", "--json");
+  assert.equal(empty.code, 1);
+  assert.match(JSON.parse(empty.output).error.message, /--search exige um texto não vazio/);
+});
+
+test("help follows the system language and supports a manual override", async t => {
+  const root = fixture(t);
+  const portuguese = await runWithEnv(root, { LC_ALL: "pt_BR.UTF-8", TASKROOT_LANG: "" }, "--help");
+  assert.equal(portuguese.code, 0, portuguese.output);
+  assert.match(portuguese.output, /\nUso\n/);
+  assert.match(portuguese.output, /\nComandos\n/);
+  assert.match(portuguese.output, /Cria uma tarefa com ID automático/);
+
+  const english = await runWithEnv(root, { LC_ALL: "en_BR.UTF-8", TASKROOT_LANG: "" }, "--help");
+  assert.equal(english.code, 0, english.output);
+  assert.match(english.output, /\nUsage\n/);
+  assert.match(english.output, /\nCommands\n/);
+  assert.match(english.output, /Creates a task with an automatic ID/);
+
+  const override = await runWithEnv(root, { LC_ALL: "en_US.UTF-8", TASKROOT_LANG: "pt-BR" }, "--help");
+  assert.match(override.output, /\nUso\n/);
+
+  const englishTask = await runWithEnv(root, { LC_ALL: "en_US.UTF-8", TASKROOT_LANG: "" }, "new", "app", "--title", "English task");
+  assert.equal(englishTask.code, 0, englishTask.output);
+  const englishTable = await runWithEnv(root, { LC_ALL: "en_US.UTF-8", TASKROOT_LANG: "" }, "list", "--all");
+  assert.equal(englishTable.code, 0, englishTable.output);
+  assert.match(englishTable.output, /\| ID\s+\| STATUS\s+\| PHASE\s+\| PRIORITY\s+\| MILESTONE\s+\| TITLE\s+\| DEPENDENCIES\s+\|/);
 });
 
 test("reopening a completed task archives evidence and clears completion date", async t => {
@@ -191,7 +330,7 @@ test("JSON mode keeps validation failures machine-readable", async t => {
   assert.equal(invalidOption.code, 1);
   const optionError = JSON.parse(invalidOption.output);
   assert.equal(optionError.ok, false);
-  assert.match(optionError.error.message, /prioridade invalida/);
+  assert.match(optionError.error.message, /Prioridade inválida/);
 
   const document = read(root);
   document.tasks.push({ id: "APP-001", title: "Broken", status: "pending", depends_on: 42 });

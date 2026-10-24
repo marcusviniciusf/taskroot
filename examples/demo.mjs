@@ -8,7 +8,10 @@ const cli = fileURLToPath(new URL("../bin/tasks.mjs", import.meta.url));
 const root = mkdtempSync(join(tmpdir(), "taskroot-demo-"));
 const env = { ...process.env, TASKS_DIR: root };
 writeFileSync(join(root, "milestones.json"), JSON.stringify({
-  M1: { name: "Search MVP", goal: "Let customers find products" },
+  schema_version: 1,
+  milestones: {
+    M1: { name: "Search MVP", goal: "Let customers find products" },
+  },
 }));
 
 function run(...args) {
