@@ -11,15 +11,29 @@
   "bugs": {
     "url": "https://github.com/marcusviniciusf/taskroot/issues"
   },
-  "keywords": ["backlog", "tasks", "cli", "agents", "json", "local-first"],
-  "files": ["bin/", "lib/", "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE"],
+  "keywords": [
+    "backlog",
+    "tasks",
+    "cli",
+    "agents",
+    "json",
+    "local-first"
+  ],
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test",
     "prepublishOnly": "npm test"
   },
   "bin": {
-    "tasks": "./bin/tasks.mjs",
-    "taskroot": "./bin/tasks.mjs"
+    "tasks": "bin/tasks.mjs",
+    "taskroot": "bin/tasks.mjs"
   },
   "engines": {
     "node": ">=22"
