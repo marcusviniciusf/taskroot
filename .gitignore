@@ -1,0 +1,6 @@
+node_modules/
+tasks/
+ANALISE.md
+.DS_Store
+npm-debug.log*
+*.tmp

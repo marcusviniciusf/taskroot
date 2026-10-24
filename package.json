@@ -1,0 +1,28 @@
+{
+  "name": "taskroot",
+  "version": "0.1.0",
+  "description": "Local-first JSON backlog for developers and coding agents",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marcusviniciusf/taskroot.git"
+  },
+  "homepage": "https://github.com/marcusviniciusf/taskroot#readme",
+  "bugs": {
+    "url": "https://github.com/marcusviniciusf/taskroot/issues"
+  },
+  "keywords": ["backlog", "tasks", "cli", "agents", "json", "local-first"],
+  "files": ["bin/", "lib/", "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test",
+    "prepublishOnly": "npm test"
+  },
+  "bin": {
+    "tasks": "./bin/tasks.mjs",
+    "taskroot": "./bin/tasks.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}
